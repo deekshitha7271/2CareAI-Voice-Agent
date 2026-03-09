@@ -127,16 +127,25 @@ class VoiceAIOrchestrator:
 
         # 2. Inject Active Clinical Mission (Campaign Context)
         if self.campaign_context:
-            # ... (same as before)
             c = self.campaign_context
             campaign_instr = f"""
-### ACTIVE CLINICAL TASK (OUTBOUND CAMPAIGN):
-Goal: Follow up with {c.get('patient_name', 'patient')} (Appt: {c.get('appointment_id', 'N/A')}) 
-Details: Appointment with {c.get('doctor_name', 'doctor')} on {c.get('date_str', 'date')} at {c.get('time_str', 'time')}.
-Mission:
-- Proactively confirm attendance.
-- Use 'reschedule_appointment' or 'cancel_appointment' as needed.
-- Identify as 2Care AI and state purpose clearly.
+
+=== OUTBOUND CAMPAIGN MODE - OVERRIDE DEFAULT RULES ===
+You are NOT in inbound booking mode. You are an OUTBOUND clinical representative.
+You have ALREADY been connected to the patient. DO NOT ask for their name — you already know it.
+DO NOT ask which slot they want — an appointment is ALREADY booked for them.
+
+PATIENT CONFIRMED:     {c.get('patient_name', 'the patient')}
+EXISTING APPOINTMENT:  Dr. {c.get('doctor_name', 'the doctor')} on {c.get('date_str', 'today')} at {c.get('time_str', 'now')}
+APPOINTMENT ID:        {c.get('appointment_id', 'N/A')}
+
+YOUR MISSION:
+1. You have already greeted the patient. Now listen to their response.
+2. If they CONFIRM ("yes", "I'll be there", "sure"): Acknowledge warmly and end the check-in.
+3. If they want to RESCHEDULE: Use get_available_slots then reschedule_appointment tool.
+4. If they want to CANCEL: Use cancel_appointment tool, log the polite rejection.
+5. NEVER ask for their name. NEVER ask them to pick a slot unprompted.
+=== END CAMPAIGN MODE OVERRIDE ===
 """
             active_system_prompt += campaign_instr
 
@@ -168,6 +177,43 @@ Mission:
         # Reload history for the current (possibly new) patient_id
         past_turns = _load_redis_history(self.patient_id)
         self._rebuild_system_prompt(past_turns)
+
+    def generate_proactive_greeting(self, on_thought: Optional[callable] = None) -> Tuple[str, str]:
+        """
+        Genuinely starts a clinical campaign call.
+        Generates an AI greeting based and saves it as 'assistant' so the 
+        model doesn't respond to itself as if it were a user.
+        """
+        if on_thought: on_thought("Generating proactive clinical greeting...")
+        
+        # We use a zero-shot prompt for the greeting to ensure it's natural but grounded
+        if not self.campaign_context:
+            return "Hello! This is 2Care AI.", "en"
+
+        c = self.campaign_context
+        prompt = f"Generate a brief, warm outbound greeting for {c.get('patient_name')} regarding their appointment with {c.get('doctor_name')} at {c.get('time_str')}. State your name is 2Care AI. Keep it under 15 words."
+        
+        try:
+            resp = self.client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "system", "content": "You are a professional medical assistant."}, {"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=50
+            )
+            greeting = _clean_llm_output(resp.choices[0].message.content)
+            
+            # Save as ASSISTANT turn
+            assistant_msg = {"role": "assistant", "content": greeting}
+            self.messages.append(assistant_msg)
+            _save_to_redis(self.patient_id, assistant_msg)
+            
+            lang = detect_language(greeting)
+            self.detected_lang = lang
+            return greeting, lang
+        except Exception as e:
+            logger.error(f"[Proactive] Greeting failed: {e}")
+            fallback = f"Hello {c.get('patient_name')}! This is 2Care AI calling regarding your appointment."
+            return fallback, "en"
 
     def process_transcript(self, user_transcript: str, on_thought: Optional[callable] = None) -> Tuple[str, str]:
         """

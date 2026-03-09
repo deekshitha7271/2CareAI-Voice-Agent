@@ -10,10 +10,10 @@
 A fully autonomous real-time voice AI agent for a digital healthcare platform. Patients speak naturally in **English, Hindi, or Tamil** to book, reschedule, or cancel clinical appointments — no human intervention required.
 
 **Core capabilities:**
-- 🎤 Real-time voice pipeline: Deepgram (STT) → Groq/Llama-3 (LLM) → Cartesia (TTS)
+- 🎤 Real-time voice pipeline: Deepgram (STT) → Groq/Llama-3.1 (LLM) → Edge-TTS (TTS Streaming)
 - 🌐 Multilingual: auto-detects English / Hindi / Tamil per utterance; sustains language across sessions
-- 🧠 Two-tier memory: Redis (session, 30-min TTL) + MongoDB Atlas (long-term patient profiles)
-- 🛠 Genuine tool-calling: `get_available_slots` + `book_appointment` via Groq function-calling API
+- 🧠 Two-tier memory: Active Session UI (ephemeral) + MongoDB Atlas (long-term patient history)
+- 🛠 Genuine tool-calling: `get_available_slots` + `book_appointment` + `cancel_appointment` + `reschedule_appointment` via Groq function-calling API
 - 📣 Outbound campaigns: Celery + Redis background job queue for reminder calls
 - ⚡ Barge-in: user can interrupt agent mid-speech; frontend stops audio and sends new utterance
 - 🔒 Conflict prevention: Redis optimistic locks + DB double-check on every booking
@@ -24,8 +24,7 @@ A fully autonomous real-time voice AI agent for a digital healthcare platform. P
 
 ### Prerequisites
 - Python 3.10+, Node.js 18+
-- Redis (local or managed)
-- API keys: Deepgram, Groq, Cartesia, MongoDB Atlas URI
+- API keys: Deepgram, Groq, MongoDB Atlas URI
 
 ### Backend
 ```bash
@@ -62,12 +61,10 @@ python -m pytest tests/ -v
 │   │   ├── orchestrator.py   # Agentic loop: LLM + tool-calling + language detection
 │   │   └── tools.py          # get_available_slots, book_appointment (MongoDB-backed)
 │   ├── services/
-│   │   ├── language_service.py  # Unicode-range language detection (EN/HI/TA)
-│   │   ├── tts_service.py       # Cartesia sonic-multilingual TTS
-│   │   └── llm_service.py       # LLM service wrapper
+│   │   └── language_service.py  # Unicode-range language detection (EN/HI/TA)
 │   ├── memory/
 │   │   ├── database.py       # MongoDB Atlas connection (lazy, with health check)
-│   │   └── session.py        # Redis session memory + optimistic booking locks (TTL 30 min)
+│   │   └── session.py        # Active session context and history loader
 │   ├── scheduling/
 │   │   └── booking.py        # Conflict-safe booking transaction (Redis lock + DB check)
 │   ├── campaigns/
@@ -106,13 +103,13 @@ Browser Mic (PCM)
 │  ├── Transcript ──▶ Orchestrator        │
 │  │   agents/orchestrator.py             │
 │  │   · detect_language()               │
-│  │   · Redis session load/save          │
-│  │   · Groq Llama-3 70B               │  ~150–200 ms
+│  │   · Session load/save                │
+│  │   · Groq Llama-3.1-8b-instant      │  ~150–200 ms
 │  │   · Tool calls (check/book)          │
 │  │   · MongoDB (appointments, patients) │
 │  │                                      │
-│  ├── Text reply ──▶ Cartesia TTS        │  ~100–120 ms
-│  │   (sonic-multilingual)               │
+│  ├── Text reply ──▶ Edge-TTS            │  ~100–120 ms
+│  │   (Streamed instantly in chunks)     │
 │  │                                      │
 │  └── Events → Frontend (JSON WS frames)│
 │     transcript / lang / latency / status│
@@ -154,9 +151,9 @@ Browser Mic (PCM)
 |-------|---------------|--------|
 | **VAD + transit** | WebSocket PCM-16 stream, 48 kHz | ~20–30 ms |
 | **STT** | Deepgram nova-2-medical, `endpointing=300ms`, `lang=multi` | ~80–120 ms |
-| **LLM** | Groq Llama-3.3-70B (LPU), TTFT optimized, `max_tokens=300` | ~120–200 ms |
+| **LLM** | Groq Llama-3.1-8b-instant (LPU), TTFT optimized | ~120–200 ms |
 | **Tool calls** (when needed) | MongoDB indexed queries | +30–50 ms |
-| **TTS** | Cartesia sonic-multilingual, WAV PCM-16, 44.1 kHz | ~80–120 ms |
+| **TTS** | Edge-TTS streaming chunks via WebSocket | ~50–100 ms |
 | **Total (P95)** | | **~350–470 ms** |
 
 All latencies are measured server-side and emitted as `{"event":"latency",...}` each turn, visible in the UI's latency panel.
@@ -177,17 +174,13 @@ All latencies are measured server-side and emitted as `{"event":"latency",...}` 
 
 ## Outbound Campaign Mode
 
-Reminders are triggered via `POST /api/campaigns/trigger` and queued as **Celery tasks** backed by Redis.
+Reminders are triggered via the **Trigger Agent Call** button in the UI, pointing to `POST /api/campaigns/trigger`.
 
-```python
-# campaigns/worker.py
-@celery_app.task
-def outbound_call_patient(patient_id, appointment_id):
-    # 1. Fetch patient phone from MongoDB
-    # 2. Build reminder message with doctor/date/time
-    # 3. Trigger Twilio/Vonage → connects to /ws/voice WebSocket
-    # 4. Agent handles patient response (confirm / reschedule / decline)
-```
+*Note: For demonstration purposes, I added a manual trigger for the Outbound Campaigns in the UI. In a true production environment, this manual trigger would be replaced by a backend cron job or task queue that automatically initiates the `start_outbound_campaign` method at the scheduled time.*
+
+1. **Context Injection:** When triggered, the backend fetches the full appointment context (Date, Time, Doctor, Patient) from MongoDB and injects it into the Orchestrator's system prompt with a strict **"OVERRIDE"** mode so it knows it's calling outbound.
+2. **Proactive Greeting:** The AI natively generates a proactive greeting (e.g., *"Hello Medha, this is 2Care AI calling regarding your appointment..."*) without relying on placeholder text or "wake words."
+3. **Response Handling:** The AI handles the patient's real-time response using `cancel_appointment` or `reschedule_appointment` tools dynamically.
 
 In development/offline mode, the task logs a simulation payload and returns gracefully.
 

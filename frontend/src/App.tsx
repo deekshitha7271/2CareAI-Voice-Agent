@@ -74,7 +74,7 @@ function TranscriptEntry({ line }: { line: TranscriptLine }) {
 function ReminderPanel() {
   const [status, setStatus] = useState<{ type: 'success' | 'error' | 'info'; msg: string } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [patients, setPatients] = useState<{id: string, name: string}[]>([]);
+  const [patients, setPatients] = useState<any[]>([]);
   const [selectedPatient, setSelectedPatient] = useState('');
 
   const fetchTasks = () => {
@@ -107,10 +107,16 @@ function ReminderPanel() {
     setLoading(true);
     setStatus(null);
     try {
+      // Find the full patient object to pass all precomputed context
+      const patientObj = patients.find(p => p.id === selectedPatient) || { id: selectedPatient };
+      
       const res = await fetch('http://127.0.0.1:8000/api/campaigns/trigger', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ patient_id: selectedPatient }),
+        body: JSON.stringify({
+          patient_id: selectedPatient,
+          ...patientObj // Spreads patient_name, doctor_name, date_str, time_str, etc.
+        }),
       });
       const data = await res.json();
       if (data.status === 'error') {

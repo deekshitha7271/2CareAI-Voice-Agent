@@ -70,7 +70,10 @@ class VoiceSession:
         await self.send_event({"event": "transcript", "role": "agent", "text": ai_text})
         await self.send_event({"event": "status", "state": "speaking"})
 
-        # 4. TTS (Multi-lang via Edge-TTS)
+        await self._stream_tts(ai_text, lang, stt_ms, llm_ms)
+
+    async def _stream_tts(self, ai_text: str, lang: str, stt_ms: int, llm_ms: int):
+        """Optimized TTS pipeline that streams audio chunks instantly to reduce TTFA."""
         try:
             t_tts = time.time()
             import edge_tts
@@ -78,7 +81,9 @@ class VoiceSession:
             voice = voice_map.get(lang, "en-IN-NeerjaNeural")
             
             communicate = edge_tts.Communicate(ai_text, voice)
+            communicate = edge_tts.Communicate(ai_text, voice)
             audio_bytes = b""
+            
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
                     audio_bytes += chunk["data"]
@@ -100,6 +105,25 @@ class VoiceSession:
             logger.error(f"[TTS] Critical Error: {e}", exc_info=True)
         
         await self.send_event({"event": "status", "state": "listening"})
+
+    async def start_outbound_campaign(self):
+        """Genuinely initiate an outbound call without 'fake' user messages."""
+        if not self.is_connected: return
+        
+        await self.send_event({"event": "status", "state": "thinking"})
+        t0 = time.time()
+        
+        def on_thought(txt):
+            asyncio.run_coroutine_threadsafe(self.send_event({"event": "thought", "text": txt}), self.loop)
+
+        ai_text, lang = await asyncio.to_thread(self.orchestrator.generate_proactive_greeting, on_thought=on_thought)
+        llm_ms = int((time.time() - t0) * 1000)
+
+        await self.send_event({"event": "lang", "lang": lang})
+        await self.send_event({"event": "transcript", "role": "agent", "text": ai_text})
+        await self.send_event({"event": "status", "state": "speaking"})
+
+        await self._stream_tts(ai_text, lang, 0, llm_ms)
 
 class ConnectionManager:
     def __init__(self):
@@ -137,14 +161,26 @@ async def trigger_campaign(body: dict = None):
     context = None
     display_name = "Patient"
 
-    # Quick handle for demo items (prevents DB timeouts)
-    if p_id.startswith("demo_"):
+    # 1. Try to use precomputed context sent by the frontend (most reliable path)
+    if body.get("patient_name") and body.get("doctor_name"):
+        context = {
+            "appointment_id": body.get("appointment_id", p_id),
+            "patient_name": body["patient_name"],
+            "doctor_name": body["doctor_name"],
+            "date_str": body.get("date_str", "today"),
+            "time_str": body.get("time_str", "soon"),
+        }
+        display_name = context["patient_name"]
+        print(f"[DEBUG] Using context from frontend payload: {context}")
+
+    # 2. Quick handle for demo items
+    elif p_id.startswith("demo_"):
         demo_map = {
-            "demo_1": {"patient_name": "Aditi Sharma", "doctor_name": "Dr. Miku", "date_str": "Tomorrow", "time_str": "10:00 AM"},
+            "demo_1": {"patient_name": "Aditi Sharma", "doctor_name": "Dr. Medha", "date_str": "Tomorrow", "time_str": "10:00 AM"},
             "demo_hi": {"patient_name": "Rajesh Kumar", "doctor_name": "Dr. Pallavi", "date_str": "Monday", "time_str": "02:00 PM"},
             "demo_ta": {"patient_name": "M. Thamil", "doctor_name": "Dr. Pallavi", "date_str": "Tomorrow", "time_str": "09:00 AM"}
         }
-        context = demo_map.get(p_id, {"patient_name": "Aditi", "doctor_name": "Dr. Miku", "date_str": "tomorrow", "time_str": "10am"})
+        context = demo_map.get(p_id, {"patient_name": "Aditi", "doctor_name": "Dr. Medha", "date_str": "tomorrow", "time_str": "10am"})
         display_name = context["patient_name"]
         print(f"[DEBUG] Using demo context for {p_id}")
     else:
@@ -177,8 +213,8 @@ async def trigger_campaign(body: dict = None):
     session.orchestrator.set_campaign_context(context, new_patient_id=p_id)
     session.patient_id = p_id
     
-    initial_msg = f"Hello {display_name}! This is 2Care AI calling regarding your clinical appointment. How are you?"
-    asyncio.create_task(session.process_and_respond(initial_msg, is_outbound=True))
+    # Trigger the genuine generative outbound greeting
+    asyncio.create_task(session.start_outbound_campaign())
     
     return {"status": "started", "message": f"Campaign initiated for {display_name}"}
 
@@ -201,10 +237,19 @@ async def get_patients():
             }).sort("appointment_time", 1).limit(5)
             
             for doc in cursor:
+                appt_time = doc.get("appointment_time")
+                date_str = appt_time.strftime("%A, %d %B") if appt_time else "today"
+                time_str = appt_time.strftime("%I:%M %p") if appt_time else "soon"
                 tasks.append({
                     "id": str(doc["_id"]),
                     "name": f"Remind: {doc['patient_name']} ({doc['doctor_name']})",
-                    "type": "reminder"
+                    "type": "reminder",
+                    # Embed full context so frontend can pass it back to trigger_campaign
+                    "patient_name": doc.get("patient_name", "Patient"),
+                    "doctor_name": doc.get("doctor_name", "Doctor"),
+                    "date_str": date_str,
+                    "time_str": time_str,
+                    "appointment_id": str(doc["_id"])
                 })
     except Exception as e:
         logger.error(f"[API] Error fetching clinic tasks: {e}")

@@ -47,8 +47,8 @@ Rules:
 9. Confirm the exact date, time, and doctor with the patient.
 10. NEVER output raw function syntax like <function=...> in spoken replies.
 11. Be warm, empathetic, and professional.
-
-Reasoning traces are logged — think step by step before calling tools.
+12. NEVER mention sending a "confirmation message" or "SMS" to a "registered phone number" UNLESS the patient has explicitly provided their phone number in the current conversation. If no number is provided, simply confirm the booking details.
+13. ALWAYS use full month names for dates (e.g., "10th March" or "March 10th"). NEVER use numerical date formats like "3/10" or "10/3", as they are ambiguous for speech and reasoning.
 """
 
 
@@ -136,7 +136,7 @@ You have ALREADY been connected to the patient. DO NOT ask for their name — yo
 DO NOT ask which slot they want — an appointment is ALREADY booked for them.
 
 PATIENT CONFIRMED:     {c.get('patient_name', 'the patient')}
-EXISTING APPOINTMENT:  Dr. {c.get('doctor_name', 'the doctor')} on {c.get('date_str', 'today')} at {c.get('time_str', 'now')}
+EXISTING APPOINTMENT:  Doctor. {c.get('doctor_name', 'the doctor')} on {c.get('date_str', 'today')} at {c.get('time_str', 'now')}
 APPOINTMENT ID:        {c.get('appointment_id', 'N/A')}
 
 YOUR MISSION:
@@ -191,7 +191,7 @@ YOUR MISSION:
             return "Hello! This is 2Care AI.", "en"
 
         c = self.campaign_context
-        prompt = f"Generate a brief, warm outbound greeting for {c.get('patient_name')} regarding their appointment with {c.get('doctor_name')} at {c.get('time_str')}. State your name is 2Care AI. Keep it under 15 words."
+        prompt = f"Generate a brief, warm outbound greeting for {c.get('patient_name')} regarding their appointment with {c.get('doctor_name')} on {c.get('date_str')} at {c.get('time_str')}. State your name is 2Care AI. Keep it under 15 words. Use long-form spoken dates (e.g., 10th March) and NEVER use 3/10 or similar numerical formats."
         
         try:
             resp = self.client.chat.completions.create(

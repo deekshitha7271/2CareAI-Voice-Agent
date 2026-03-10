@@ -48,7 +48,7 @@ def _connect():
 def _ensure_indexes(db):
     """Create performance indexes — called once after successful connection."""
     try:
-        db.patients.create_index("phone_number", unique=True, sparse=True)
+        db.patients.create_index("phone_number", sparse=True)
         db.appointments.create_index(
             [("doctor_name", 1), ("appointment_time", 1), ("status", 1)]
         )

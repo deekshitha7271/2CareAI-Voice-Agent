@@ -59,8 +59,14 @@ export function useVoiceAgent() {
     setTranscript(prev => [...prev, { role, text, ts: Date.now() }]);
   }, []);
 
+  const audioQueue = useRef<Blob[]>([]);
+  const isPlaying = useRef(false);
+
   // ── Stop all current audio (Cartesia WAV) ────────────────────
   const stopAllAudio = useCallback(() => {
+    // Clear the queue
+    audioQueue.current = [];
+    isPlaying.current = false;
     // Stop AudioContext source node
     if (currentNode.current) {
       try { currentNode.current.stop(); } catch (_) {}
@@ -68,13 +74,14 @@ export function useVoiceAgent() {
     }
   }, []);
 
-  // ── Play WAV bytes via AudioContext (robust, format-agnostic) ──────────────
-  // AudioContext.decodeAudioData handles WAV natively with no MIME-type guessing.
-  const playAudioBytes = useCallback(async (blob: Blob) => {
-    stopAllAudio();
+  const processAudioQueue = useCallback(async () => {
+    if (isPlaying.current || audioQueue.current.length === 0) return;
+    
+    isPlaying.current = true;
+    const blob = audioQueue.current.shift()!;
+    
     try {
       const ctx = getAudioCtx();
-      // Resume context if suspended (browser autoplay policy)
       if (ctx.state === 'suspended') await ctx.resume();
 
       const arrayBuffer = await blob.arrayBuffer();
@@ -87,23 +94,36 @@ export function useVoiceAgent() {
 
       source.onended = () => {
         currentNode.current = null;
-        updateAgentState('listening');
-        if (listeningRef.current && recognition.current) {
-          try { recognition.current.start(); } catch (_) {}
+        isPlaying.current = false;
+        
+        if (audioQueue.current.length > 0) {
+          processAudioQueue();
+        } else {
+          updateAgentState('listening');
+          if (listeningRef.current && recognition.current) {
+            try { recognition.current.start(); } catch (_) {}
+          }
         }
       };
+      
       source.start(0);
       updateAgentState('speaking');
       
-      // Definitively flush the microphone buffer to prevent echo loop (blurred voice)
       if (recognition.current) {
         try { recognition.current.abort(); } catch (_) {}
       }
     } catch (err) {
       console.error('[TTS] AudioContext decode failed:', err);
-      updateAgentState('listening');
+      isPlaying.current = false;
+      processAudioQueue(); // Try next in queue
     }
-  }, [stopAllAudio, updateAgentState]);
+  }, [updateAgentState]);
+
+  // ── Play WAV bytes via AudioContext (robust, format-agnostic) ──────────────
+  const playAudioBytes = useCallback((blob: Blob) => {
+    audioQueue.current.push(blob);
+    processAudioQueue();
+  }, [processAudioQueue]);
 
   // ── Handle structured WebSocket events from server ─────────────────────────
   const handleServerEvent = useCallback((payload: any) => {

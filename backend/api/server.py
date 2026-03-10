@@ -2,7 +2,9 @@ import asyncio
 import json
 import time
 import os
+import re
 import logging
+import edge_tts
 from typing import List, Dict, Optional
 from datetime import datetime
 
@@ -73,34 +75,67 @@ class VoiceSession:
         await self._stream_tts(ai_text, lang, stt_ms, llm_ms)
 
     async def _stream_tts(self, ai_text: str, lang: str, stt_ms: int, llm_ms: int):
-        """Optimized TTS pipeline that streams audio chunks instantly to reduce TTFA."""
+        """Optimized TTS: Byte-stream within sentence chunks for instant TTFA."""
         try:
-            t_tts = time.time()
-            import edge_tts
+            t0 = time.time()
             voice_map = {"hi": "hi-IN-SwaraNeural", "ta": "ta-IN-PallaviNeural", "en": "en-IN-NeerjaNeural"}
             voice = voice_map.get(lang, "en-IN-NeerjaNeural")
+
+            # 1. Quick Sentence Splitting
+            raw_splits = re.split(r'([.!?]+)', ai_text)
+            sentences = []
+            for i in range(0, len(raw_splits) - 1, 2):
+                text = raw_splits[i].strip() + raw_splits[i+1]
+                if text: sentences.append(text)
+            if len(raw_splits) % 2 != 0 and raw_splits[-1].strip():
+                sentences.append(raw_splits[-1].strip())
             
-            communicate = edge_tts.Communicate(ai_text, voice)
-            communicate = edge_tts.Communicate(ai_text, voice)
-            audio_bytes = b""
+            if not sentences: return
+
+            total_bytes = 0
+            ttfa_ms = 0
+            first_byte_sent = False
+
+            # 2. Buffered Byte-Streaming (approx 8KB per chunk for stability)
+            CHUNK_THRESHOLD = 8192 # 8KB
+            for text in sentences:
+                if not self.is_connected: break
+                
+                communicate = edge_tts.Communicate(text, voice)
+                buffer = b""
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio" and self.is_connected:
+                        buffer += chunk["data"]
+                        
+                        if len(buffer) >= CHUNK_THRESHOLD:
+                            total_bytes += len(buffer)
+                            await self.websocket.send_bytes(buffer)
+                            
+                            # Log TTFA (Time to First Audio)
+                            if not first_byte_sent:
+                                first_byte_sent = True
+                                ttfa_ms = int((time.time() - t0) * 1000)
+                                await self.send_event({
+                                    "event": "latency",
+                                    "stt_ms": stt_ms,
+                                    "llm_ms": llm_ms,
+                                    "tts_ms": ttfa_ms,
+                                    "total_ms": stt_ms + llm_ms + ttfa_ms
+                                })
+                            buffer = b""
+
+                # Flush remaining buffer for this sentence
+                if buffer and self.is_connected:
+                    total_bytes += len(buffer)
+                    await self.websocket.send_bytes(buffer)
+                    if not first_byte_sent:
+                        first_byte_sent = True
+                        ttfa_ms = int((time.time() - t0) * 1000)
+                        await self.send_event({"event":"latency","stt_ms":stt_ms,"llm_ms":llm_ms,"tts_ms":ttfa_ms,"total_ms":stt_ms+llm_ms+ttfa_ms})
+                    buffer = b""
             
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    audio_bytes += chunk["data"]
-            
-            tts_ms = int((time.time() - t_tts) * 1000)
-            if audio_bytes and self.is_connected:
-                logger.info(f"[TTS] Generated {len(audio_bytes)} bytes in {tts_ms}ms. Sending to client...")
-                await self.websocket.send_bytes(audio_bytes)
-                await self.send_event({
-                    "event": "latency", 
-                    "stt_ms": stt_ms, 
-                    "llm_ms": llm_ms, 
-                    "tts_ms": tts_ms, 
-                    "total_ms": stt_ms + llm_ms + tts_ms
-                })
-            else:
-                logger.warning(f"[TTS] No audio generated or client disconnected. Bytes: {len(audio_bytes)}")
+            logger.info(f"[TTS] Streamed {total_bytes} bytes (TTFA: {ttfa_ms}ms).")
+
         except Exception as e:
             logger.error(f"[TTS] Critical Error: {e}", exc_info=True)
         
@@ -238,8 +273,20 @@ async def get_patients():
             
             for doc in cursor:
                 appt_time = doc.get("appointment_time")
-                date_str = appt_time.strftime("%A, %d %B") if appt_time else "today"
+                
+                # Natural date string logic
+                date_str = "today"
+                if appt_time:
+                    delta = appt_time.date() - datetime.utcnow().date()
+                    if delta.days == 0:
+                        date_str = "today"
+                    elif delta.days == 1:
+                        date_str = "tomorrow"
+                    else:
+                        date_str = appt_time.strftime("%A, %d %B")
+                        
                 time_str = appt_time.strftime("%I:%M %p") if appt_time else "soon"
+                
                 tasks.append({
                     "id": str(doc["_id"]),
                     "name": f"Remind: {doc['patient_name']} ({doc['doctor_name']})",
@@ -253,15 +300,6 @@ async def get_patients():
                 })
     except Exception as e:
         logger.error(f"[API] Error fetching clinic tasks: {e}")
-
-    # Fallback/Demo items
-    if len(tasks) < 3:
-        demo_items = [
-            {"id": "demo_1", "name": "Remind: Aditi Sharma (Demo)"},
-            {"id": "demo_hi", "name": "Reschedule: Rajesh Kumar (Demo)"},
-            {"id": "demo_ta", "name": "Confirm: M. Thamil (Demo)"}
-        ]
-        tasks.extend(demo_items)
 
     return {"patients": tasks[:8]}
 

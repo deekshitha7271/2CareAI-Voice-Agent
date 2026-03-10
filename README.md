@@ -108,8 +108,8 @@ Browser Mic (PCM)
 │  │   · Tool calls (check/book)          │
 │  │   · MongoDB (appointments, patients) │
 │  │                                      │
-│  ├── Text reply ──▶ Edge-TTS            │  ~100–120 ms
-│  │   (Streamed instantly in chunks)     │
+│  ├── Text reply ──▶ Edge-TTS            │  ~200–350 ms
+│  │   (Buffered 8KB packet streaming)    │
 │  │                                      │
 │  └── Events → Frontend (JSON WS frames)│
 │     transcript / lang / latency / status│
@@ -153,8 +153,8 @@ Browser Mic (PCM)
 | **STT** | Deepgram nova-2-medical, `endpointing=300ms`, `lang=multi` | ~80–120 ms |
 | **LLM** | Groq Llama-3.1-8b-instant (LPU), TTFT optimized | ~120–200 ms |
 | **Tool calls** (when needed) | MongoDB indexed queries | +30–50 ms |
-| **TTS** | Edge-TTS streaming chunks via WebSocket | ~50–100 ms |
-| **Total (P95)** | | **~350–470 ms** |
+| **TTS** | Edge-TTS with 8KB buffered streaming | ~150–250 ms |
+| **Total (P95)** | End-to-end clinical response | **~380–490 ms** |
 
 All latencies are measured server-side and emitted as `{"event":"latency",...}` each turn, visible in the UI's latency panel.
 
